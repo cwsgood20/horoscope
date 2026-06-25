@@ -1,0 +1,83 @@
+name: Generate daily fortunes
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "10 15 * * *"
+
+permissions:
+  contents: write
+  models: read
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate fortune JSON with GitHub Models
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.request
+          from datetime import datetime, timezone, timedelta
+
+          kst = timezone(timedelta(hours=9))
+          today = datetime.now(kst).strftime("%Y-%m-%d")
+          narrators = ["sanshin", "zeus", "plato", "caesar", "heracles", "cleopatra", "merlin"]
+          prompt = f"""
+          오늘 날짜는 {today}입니다.
+          모바일 웹게임 '오늘의 운세를 음성과 자막으로 듣기'에 넣을 한국어 운세를 JSON만으로 작성하세요.
+          키는 sanshin, zeus, plato, caesar, heracles, cleopatra, merlin 입니다.
+          각 값은 해당 인물이 말하는 듯한 3~4문장 운세입니다.
+          조건:
+          - 한국어
+          - 유머가 많지만 과도하게 길지 않게
+          - 점술은 오락용 느낌
+          - 비속어, 혐오, 선정성 없음
+          - JSON 객체만 출력
+          """
+          body = {
+              "model": "openai/gpt-4o-mini",
+              "messages": [
+                  {"role": "system", "content": "You write safe, funny Korean daily fortunes as compact JSON."},
+                  {"role": "user", "content": prompt},
+              ],
+              "temperature": 0.9,
+              "max_tokens": 1200,
+          }
+          request = urllib.request.Request(
+              "https://models.github.ai/inference/chat/completions",
+              data=json.dumps(body).encode("utf-8"),
+              headers={
+                  "Content-Type": "application/json",
+                  "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
+              },
+              method="POST",
+          )
+          with urllib.request.urlopen(request, timeout=60) as response:
+              payload = json.loads(response.read().decode("utf-8"))
+          content = payload["choices"][0]["message"]["content"].strip()
+          if content.startswith("```"):
+              content = content.strip("`")
+              content = content.replace("json\n", "", 1).replace("json\r\n", "", 1)
+          fortunes = json.loads(content)
+          missing = [key for key in narrators if key not in fortunes]
+          if missing:
+              raise SystemExit(f"Missing narrator keys: {missing}")
+          os.makedirs("data", exist_ok=True)
+          with open("data/fortune.json", "w", encoding="utf-8") as file:
+              json.dump({"date": today, "model": body["model"], "fortunes": fortunes}, file, ensure_ascii=False, indent=2)
+              file.write("\n")
+          PY
+
+      - name: Commit generated fortunes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/fortune.json
+          git diff --cached --quiet || git commit -m "Update daily fortunes"
+          git push
